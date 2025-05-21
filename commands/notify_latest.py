@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from utils.config import load_config
-from utils.youtube import fetch_latest_video, is_livestream, get_start_time, fetch_video_details
+from utils.youtube import fetch_latest_video, fetch_video_details, is_livestream, get_start_time
 
 class NotifyLatest(commands.Cog):
     def __init__(self, bot):
@@ -21,7 +21,7 @@ class NotifyLatest(commands.Cog):
                 continue
 
             video = await fetch_latest_video(youtube_channel_id)
-            if not video:
+            if not video or not video.get("videoId"):
                 continue
 
             channel = self.bot.get_channel(int(discord_channel_id))
@@ -30,6 +30,8 @@ class NotifyLatest(commands.Cog):
 
             video_url = f"https://www.youtube.com/watch?v={video['videoId']}"
             details = await fetch_video_details(video["videoId"])
+            if not details:
+                continue
 
             if is_livestream(details):
                 start_time = get_start_time(details)
