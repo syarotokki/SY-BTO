@@ -2,42 +2,56 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from utils.config import load_config
-from utils.youtube import fetch_all_videos, is_livestream, get_start_time
+from utils.youtube import (
+    fetch_all_videos,
+    fetch_video_details,
+    is_livestream,
+    get_start_time,
+    convert_to_jst,
+)
 
-class NotifyPast(commands.Cog):
+class NotifyPastCommand(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="notify_past", description="登録されたチャンネルの過去の動画をすべて通知します。")
+    @app_commands.command(name="notify_past", description="過去の動画を通知します。")
     async def notify_past(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(thinking=True)
+
         config = load_config()
-        count = 0
+        notified_count = 0
 
         for channel_id, discord_channel_id in config.items():
-            videos = fetch_all_videos(channel_id)
+            videos = fetch_all_videos(channel_id, max_results=100)
             if not videos:
                 continue
 
-            for video in reversed(videos):  # 古い順に通知
-                url = f"https://www.youtube.com/watch?v={video['id']['videoId']}"
-                title = video["snippet"]["title"]
-                is_live = is_livestream(video)
-                start_time = get_start_time(video)
+            discord_channel = self.bot.get_channel(discord_channel_id)
+            if not discord_channel:
+                continue
 
-                message = (
-                    f"🔴 **ライブ配信がありました！**\n{title}\n{url}\n開始時刻: {start_time}"
-                    if is_live else
-                    f"📺 **過去の動画:**\n{title}\n{url}"
-                )
+            for video in reversed(videos):
+                video_id = video["id"]["videoId"]
+                details = fetch_video_details(video_id)
+                if not details:
+                    continue
 
-                channel = self.bot.get_channel(discord_channel_id)
-                if channel:
-                    await channel.send(message)
+                title = details["snippet"]["title"]
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                published_at = convert_to_jst(details["snippet"]["publishedAt"])
 
-            count += 1
+                if is_livestream(details):
+                    start_time = get_start_time(details)
+                    message = f"🔴 ライブ配信が始まりました！\n**{title}**\n開始時刻：{start_time}\n{url}"
+                else:
+                    message = f"📺 新しい動画が公開されました！\n**{title}**\n公開日時：{published_at}\n{url}"
 
-        await interaction.followup.send(f"✅ {count} 件のチャンネルに過去動画を通知しました。")
+                await discord_channel.send(message)
 
-async def setup(bot):
-    await bot.add_cog(NotifyPast(bot))
+            notified_count += 1
+
+        await interaction.followup.send(f"✅ {notified_count} 件のチャンネルに過去動画を通知しました。")
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(NotifyPastCommand(bot))
