@@ -1,83 +1,93 @@
 import os
-import random
 import requests
-from dateutil import parser
 from datetime import datetime
+from dateutil import parser
 import pytz
-from utils.config import load_config, save_config
+import json
 
-API_KEYS = os.getenv("YOUTUBE_API_KEY", "").split(",")
+from utils.config import get_config, get_log_channel
 
-def fetch_latest_video(channel_id):
-    for api_key in API_KEYS:
-        try:
-            url = (
-                f"https://www.googleapis.com/youtube/v3/search"
-                f"?key={api_key}&channelId={channel_id}&part=snippet,id&order=date&maxResults=1"
-            )
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-            if "items" not in data or not data["items"]:
-                send_log(f"⚠️ APIキー `{api_key[:8]}...` では動画が取得できませんでした。")
-                continue
-            return data["items"][0]
-        except Exception as e:
-            send_log(f"❌ APIキー `{api_key[:8]}...` での fetch_latest_video に失敗: {e}")
+YOUTUBE_API_KEYS = os.getenv("YOUTUBE_API_KEYS", "").split(",")
+
+# タイムゾーンをJSTに設定
+JST = pytz.timezone("Asia/Tokyo")
+
+def get_valid_api_key():
+    return YOUTUBE_API_KEYS
+
+async def fetch_latest_video(channel_id, bot, guild_id):
+    for api_key in get_valid_api_key():
+        url = (
+            f"https://www.googleapis.com/youtube/v3/search?key={api_key}"
+            f"&channelId={channel_id}&part=snippet,id&order=date&maxResults=1"
+        )
+        response = requests.get(url)
+        data = response.json()
+
+        if "error" in data:
+            reason = data["error"]["errors"][0].get("reason", "unknown")
+            log_channel_id = get_log_channel(guild_id)
+            if log_channel_id:
+                log_channel = bot.get_channel(int(log_channel_id))
+                if log_channel:
+                    await log_channel.send(f"❌ APIキーが使用できませんでした（{api_key}）: {reason}")
+            continue  # 次のキーを試す
+
+        items = data.get("items", [])
+        if not items:
+            return None
+
+        video = items[0]
+        video_id = video["id"].get("videoId")
+        if not video_id:
+            return None
+
+        video_details = await fetch_video_details(video_id, bot, guild_id)
+        return video_details
+
     return None
 
-def fetch_all_videos(channel_id, max_results=10):
-    for api_key in API_KEYS:
-        try:
-            url = (
-                f"https://www.googleapis.com/youtube/v3/search"
-                f"?key={api_key}&channelId={channel_id}&part=snippet,id&order=date&maxResults={max_results}"
-            )
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-            if "items" not in data:
-                send_log(f"⚠️ APIキー `{api_key[:8]}...` では過去動画が取得できませんでした。")
-                continue
-            return data["items"]
-        except Exception as e:
-            send_log(f"❌ APIキー `{api_key[:8]}...` での fetch_all_videos に失敗: {e}")
-    return []
+async def fetch_video_details(video_id, bot, guild_id):
+    for api_key in get_valid_api_key():
+        url = (
+            f"https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails"
+            f"&id={video_id}&key={api_key}"
+        )
+        response = requests.get(url)
+        data = response.json()
+
+        if "error" in data:
+            reason = data["error"]["errors"][0].get("reason", "unknown")
+            log_channel_id = get_log_channel(guild_id)
+            if log_channel_id:
+                log_channel = bot.get_channel(int(log_channel_id))
+                if log_channel:
+                    await log_channel.send(f"❌ 動画詳細取得時にAPIキーが使用できませんでした（{api_key}）: {reason}")
+            continue
+
+        items = data.get("items", [])
+        if not items:
+            return None
+
+        item = items[0]
+        return {
+            "video_id": video_id,
+            "title": item["snippet"]["title"],
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "is_live": "liveStreamingDetails" in item,
+            "start_time": item.get("liveStreamingDetails", {}).get("scheduledStartTime")
+        }
+
+    return None
 
 def is_livestream(video):
-    return video["id"].get("kind") == "youtube#video" and video["snippet"].get("liveBroadcastContent") == "live"
+    return video.get("is_live", False)
 
-def get_start_time(video_id):
-    for api_key in API_KEYS:
-        try:
-            url = (
-                f"https://www.googleapis.com/youtube/v3/videos"
-                f"?key={api_key}&id={video_id}&part=liveStreamingDetails"
-            )
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-            return data["items"][0]["liveStreamingDetails"]["actualStartTime"]
-        except Exception as e:
-            send_log(f"❌ APIキー `{api_key[:8]}...` での get_start_time に失敗: {e}")
-    return None
-
-def convert_to_jst(iso_time):
-    utc_time = parser.isoparse(iso_time)
-    jst = pytz.timezone("Asia/Tokyo")
-    return utc_time.astimezone(jst).strftime('%Y/%m/%d %H:%M:%S')
-
-def send_log(message):
-    config = load_config()
-    log_channel_id = config.get("log_channel_id")
-    logging_enabled = config.get("log_enabled", False)
-    if log_channel_id and logging_enabled:
-        try:
-            from main import bot  # 遅延インポート
-            import asyncio
-            channel = bot.get_channel(int(log_channel_id))
-            if channel:
-                asyncio.create_task(channel.send(message))
-        except Exception as e:
-            print("ログ送信に失敗:", e)
+def get_start_time(video):
+    start_time_str = video.get("start_time")
+    if not start_time_str:
+        return "不明"
+    dt = parser.parse(start_time_str)
+    dt_jst = dt.astimezone(JST)
+    return dt_jst.strftime("%Y/%m/%d %H:%M").replace(" ", "\n")
 
