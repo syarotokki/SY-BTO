@@ -92,4 +92,3 @@ def get_start_time(video_id):
         start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
         return start_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return None
-
