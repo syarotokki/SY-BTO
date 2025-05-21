@@ -1,52 +1,74 @@
-import os
 import requests
-from dateutil import parser
-import pytz
+import os
+from datetime import datetime, timezone
 
-API_KEYS = os.getenv("YOUTUBE_API_KEY", "").split(",")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-def fetch_latest_video(channel_id):
-    errors = []
-    for api_key in API_KEYS:
-        try:
-            url = (
-                "https://www.googleapis.com/youtube/v3/search"
-                f"?key={api_key}"
-                f"&channelId={channel_id}"
-                "&part=snippet"
-                "&order=date"
-                "&maxResults=1"
-            )
-            response = requests.get(url)
-            data = response.json()
 
-            if "error" in data:
-                error_reason = data["error"]["errors"][0].get("reason", "unknown")
-                errors.append((api_key, error_reason))
-                continue
+def fetch_all_videos(channel_id):
+    videos = []
+    base_url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "channelId": channel_id,
+        "part": "snippet",
+        "order": "date",
+        "maxResults": 50,
+        "type": "video",
+    }
 
-            items = data.get("items")
-            if items:
-                return items[0]
-        except Exception as e:
-            errors.append((api_key, str(e)))
-            continue
+    while True:
+        response = requests.get(base_url, params=params)
+        if response.status_code != 200:
+            break
 
-    raise Exception(f"全APIキーでの動画取得に失敗しました: {errors}")
+        data = response.json()
+        videos.extend(data.get("items", []))
 
-def is_livestream(video):
-    return video["snippet"].get("liveBroadcastContent") == "live"
+        if "nextPageToken" in data:
+            params["pageToken"] = data["nextPageToken"]
+        else:
+            break
 
-def get_start_time(video):
-    published_at = video["snippet"]["publishedAt"]
-    dt = parser.isoparse(published_at).astimezone(pytz.timezone("Asia/Tokyo"))
-    return dt.strftime("%Y年%m月%d日 %H:%M:%S")
+    return videos
 
-async def log_to_channel(bot, log_channel_id, message):
-    try:
-        channel = bot.get_channel(int(log_channel_id))
-        if channel:
-            await channel.send(f"📛 **ログ**: {message}")
-    except Exception as e:
-        print(f"ログチャンネルへの送信に失敗しました: {e}")
 
+def is_livestream(video_id):
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "id": video_id,
+        "part": "snippet,liveStreamingDetails",
+    }
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        return False
+
+    items = response.json().get("items", [])
+    if not items:
+        return False
+
+    return "liveStreamingDetails" in items[0]
+
+
+def get_start_time(video_id):
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "id": video_id,
+        "part": "liveStreamingDetails",
+    }
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        return None
+
+    items = response.json().get("items", [])
+    if not items:
+        return None
+
+    live_details = items[0].get("liveStreamingDetails", {})
+    start_time_str = live_details.get("actualStartTime")
+    if start_time_str:
+        start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+        return start_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return None
