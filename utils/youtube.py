@@ -1,84 +1,93 @@
 import os
 import requests
-import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from dateutil import parser
+import pytz
 
-logger = logging.getLogger("bot")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+BASE_URL = "https://www.googleapis.com/youtube/v3"
 
-api_keys = [key.strip() for key in os.getenv("YOUTUBE_API_KEY", "").split(",") if key.strip()]
-if not api_keys:
-    raise ValueError("❌ YOUTUBE_API_KEY が設定されていません。")
 
-def fetch_youtube_data(url_params: dict) -> dict:
-    for i, api_key in enumerate(api_keys):
-        params = dict(url_params)
-        params["key"] = api_key
-
-        try:
-            response = requests.get("https://www.googleapis.com/youtube/v3/search", params=params)
-            data = response.json()
-
-            if response.status_code == 200:
-                return data
-
-            if "error" in data:
-                reason = data["error"]["errors"][0].get("reason", "")
-                if reason == "quotaExceeded":
-                    logger.warning(f"⚠️ APIキー {i+1}/{len(api_keys)} がクォータ超過。次を試します。")
-                    continue
-                else:
-                    logger.error(f"❌ YouTube APIエラー: {data['error']}")
-                    raise Exception(f"YouTube API error: {data['error']}")
-        except requests.RequestException as e:
-            logger.exception("❌ YouTube APIリクエストエラー")
-            raise e
-
-    raise RuntimeError("❌ 全てのAPIキーが quotaExceeded です。")
-
-def fetch_latest_video(channel_id: str):
-    url_params = {
-        "part": "snippet",
+def fetch_latest_video(channel_id: str) -> dict | None:
+    endpoint = f"{BASE_URL}/search"
+    params = {
+        "key": YOUTUBE_API_KEY,
         "channelId": channel_id,
+        "part": "snippet",
         "order": "date",
         "maxResults": 1,
-        "type": "video"
     }
-    data = fetch_youtube_data(url_params)
+    response = requests.get(endpoint, params=params)
+    data = response.json()
     items = data.get("items", [])
-    return items[0] if items else None
+    if not items:
+        return None
+    return items[0]
 
-def fetch_all_videos(channel_id: str):
+
+def fetch_all_videos(channel_id: str, max_results: int = 50) -> list:
+    endpoint = f"{BASE_URL}/search"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "channelId": channel_id,
+        "part": "snippet",
+        "order": "date",
+        "maxResults": 50,
+        "type": "video",
+    }
     videos = []
-    next_page_token = None
+    page_count = 0
+    max_pages = max_results // 50 + 1
 
     while True:
-        url_params = {
-            "part": "snippet",
-            "channelId": channel_id,
-            "order": "date",
-            "maxResults": 50,
-            "type": "video",
-        }
-        if next_page_token:
-            url_params["pageToken"] = next_page_token
+        response = requests.get(endpoint, params=params)
+        data = response.json()
 
-        data = fetch_youtube_data(url_params)
-        items = data.get("items", [])
-        if not items:
-            break
+        for item in data.get("items", []):
+            videos.append(item)
+            if len(videos) >= max_results:
+                return videos
 
-        videos.extend(items)
-        next_page_token = data.get("nextPageToken")
-        if not next_page_token:
+        if "nextPageToken" in data and page_count < max_pages:
+            params["pageToken"] = data["nextPageToken"]
+            page_count += 1
+        else:
             break
 
     return videos
 
-def is_livestream(video):
-    return "live" in video["snippet"].get("liveBroadcastContent", "").lower()
 
-def get_start_time(video):
-    published_at = video["snippet"]["publishedAt"]
-    dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-    jst = dt.astimezone(timezone(timedelta(hours=9)))
-    return jst.strftime("%Y/%m/%d %H:%M:%S")
+def fetch_video_details(video_id: str) -> dict | None:
+    endpoint = f"{BASE_URL}/videos"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "id": video_id,
+        "part": "snippet,liveStreamingDetails",
+    }
+    response = requests.get(endpoint, params=params)
+    data = response.json()
+    items = data.get("items", [])
+    if not items:
+        return None
+    return items[0]
+
+
+def is_livestream(video: dict) -> bool:
+    return "liveStreamingDetails" in video
+
+
+def get_start_time(video: dict) -> str:
+    try:
+        start_time = video["liveStreamingDetails"]["scheduledStartTime"]
+    except KeyError:
+        start_time = video["liveStreamingDetails"].get("actualStartTime", "不明")
+
+    dt = parser.parse(start_time)
+    jst = pytz.timezone("Asia/Tokyo")
+    return dt.astimezone(jst).strftime("%Y/%m/%d %H:%M")
+
+
+def convert_to_jst(utc_time: str) -> str:
+    dt = parser.parse(utc_time)
+    jst = pytz.timezone("Asia/Tokyo")
+    return dt.astimezone(jst).strftime("%Y/%m/%d %H:%M")
