@@ -2,70 +2,58 @@ import os
 import requests
 from datetime import datetime, timezone
 import traceback
+import itertools
 
-# 複数のAPIキーをカンマ区切りで取得
+# 複数APIキーを取得・ローテーション用
 YOUTUBE_API_KEYS = os.getenv("YOUTUBE_API_KEYS", "").split(",")
-KEY_INDEX = 0
+api_key_cycle = itertools.cycle(YOUTUBE_API_KEYS)
 
-
-def get_api_key():
-    return YOUTUBE_API_KEYS[KEY_INDEX]
-
-
-def switch_api_key():
-    global KEY_INDEX
-    KEY_INDEX = (KEY_INDEX + 1) % len(YOUTUBE_API_KEYS)
-    print(f"[YouTube API] Switching to API key {KEY_INDEX + 1}/{len(YOUTUBE_API_KEYS)}")
-
-
-def youtube_api_request(url, params):
-    for _ in range(len(YOUTUBE_API_KEYS)):
-        params["key"] = get_api_key()
-        response = requests.get(url, params=params)
-        data = response.json()
-
-        # quota exceeded 対応
-        if "error" in data:
-            error = data["error"]["errors"][0]
-            reason = error.get("reason", "")
-            if reason == "quotaExceeded":
-                print(f"[YouTube API] Quota exceeded for key {KEY_INDEX + 1}.")
-                switch_api_key()
-                continue
-            else:
-                print("[YouTube API] API error:", data["error"])
-                return None
-        return data
-    print("[YouTube API] All API keys quota exceeded.")
-    return None
+def get_next_api_key():
+    return next(api_key_cycle)
 
 
 def fetch_latest_video(channel_id):
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "channelId": channel_id,
-        "part": "snippet",
-        "order": "date",
-        "maxResults": 1,
-    }
-    data = youtube_api_request(url, params)
-    if not data or "items" not in data or len(data["items"]) == 0:
-        return None
-    return data["items"][0]
+    for _ in range(len(YOUTUBE_API_KEYS)):
+        api_key = get_next_api_key()
+        url = "https://www.googleapis.com/youtube/v3/search"
+        params = {
+            "key": api_key,
+            "channelId": channel_id,
+            "part": "snippet",
+            "order": "date",
+            "maxResults": 1,
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
+
+        if response.status_code == 200 and "items" in data and len(data["items"]) > 0:
+            return data["items"][0]
+        elif "error" in data:
+            print(f"[API key {api_key}] YouTube API error:", data["error"].get("message"))
+
+    return None
 
 
 def fetch_all_videos(channel_id, max_results=50):
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "channelId": channel_id,
-        "part": "snippet",
-        "order": "date",
-        "maxResults": max_results,
-    }
-    data = youtube_api_request(url, params)
-    if not data or "items" not in data:
-        return []
-    return data["items"]
+    for _ in range(len(YOUTUBE_API_KEYS)):
+        api_key = get_next_api_key()
+        url = "https://www.googleapis.com/youtube/v3/search"
+        params = {
+            "key": api_key,
+            "channelId": channel_id,
+            "part": "snippet",
+            "order": "date",
+            "maxResults": max_results,
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
+
+        if response.status_code == 200 and "items" in data:
+            return data["items"]
+        elif "error" in data:
+            print(f"[API key {api_key}] YouTube API error:", data["error"].get("message"))
+
+    return []
 
 
 def is_livestream(video_data):
@@ -74,20 +62,26 @@ def is_livestream(video_data):
 
 
 def get_start_time(video_id):
-    url = "https://www.googleapis.com/youtube/v3/videos"
-    params = {
-        "id": video_id,
-        "part": "liveStreamingDetails",
-    }
-    data = youtube_api_request(url, params)
-    if not data or "items" not in data or len(data["items"]) == 0:
-        return None
+    for _ in range(len(YOUTUBE_API_KEYS)):
+        api_key = get_next_api_key()
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {
+            "key": api_key,
+            "id": video_id,
+            "part": "liveStreamingDetails",
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
 
-    details = data["items"][0].get("liveStreamingDetails", {})
-    start_time_str = details.get("actualStartTime")
-    if start_time_str:
-        start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-        return start_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        if response.status_code == 200 and "items" in data and len(data["items"]) > 0:
+            details = data["items"][0].get("liveStreamingDetails", {})
+            start_time_str = details.get("actualStartTime")
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+                return start_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        elif "error" in data:
+            print(f"[API key {api_key}] YouTube API error:", data["error"].get("message"))
+
     return None
 
 
